@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Image Editor</title>
+    <script src="https://cdn.jsdelivr.net/npm/cloudinary-core@2.11.4/cloudinary-core-shrinkwrap.min.js"></script>
+    <style>
+        #preview { max-width: 100%; margin: 20px 0; }
+        .sticker { height: 50px; margin: 5px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>Image Editor</h1>
+    
+    <input type="file" id="uploader" accept="image/*">
+    <button id="grayscaleBtn">Grayscale</button>
+    <button id="sepiaBtn">Sepia</button>
+    
+    <div>
+        <img src="https://res.cloudinary.com/demo/image/upload/smiley.png" class="sticker" data-id="smiley">
+        <img src="https://res.cloudinary.com/demo/image/upload/heart.png" class="sticker" data-id="heart">
+    </div>
+    
+    <img id="preview" src="" alt="Preview">
+    <div id="resultUrl"></div>
+
+    <script>
+        // Replace with your Cloudinary cloud name
+        const CLOUD_NAME = 'dx0wli88x';
+        const UPLOAD_PRESET = 'uploads';
+        let uploadedImageId = '';
+
+        // Initialize Cloudinary
+        const cl = cloudinary.Cloudinary.new({ cloud_name: CLOUD_NAME });
+
+        // Upload image
+        document.getElementById('uploader').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('upload_preset', UPLOAD_PRESET);
+            
+            try {
+                const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                uploadedImageId = data.public_id;
+                document.getElementById('preview').src = data.secure_url;
+            } catch (err) {
+                console.error('Upload error:', err);
+            }
+        });
+
+        // Apply filters
+        function applyFilter(effect) {
+            if (!uploadedImageId) return alert('Upload an image first');
+            const url = cl.url(uploadedImageId, { transformation: [{ effect }] });
+            document.getElementById('preview').src = url;
+        }
+
+        // Add sticker
+        function addSticker(stickerId) {
+            if (!uploadedImageId) return alert('Upload an image first');
+            const url = cl.url(uploadedImageId, {
+                transformation: [
+                    { overlay: stickerId, width: 100, gravity: "north", y: 20 },
+                    { flags: "layer_apply" }
+                ]
+            });
+            document.getElementById('preview').src = url;
+        }
+
+        // Event listeners
+        document.getElementById('grayscaleBtn').addEventListener('click', () => applyFilter('grayscale'));
+        document.getElementById('sepiaBtn').addEventListener('click', () => applyFilter('sepia'));
+        document.querySelectorAll('.sticker').forEach(sticker => {
+            sticker.addEventListener('click', () => addSticker(sticker.dataset.id));
+        });
+    </script>
+</body>
+</html>
