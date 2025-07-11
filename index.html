@@ -805,443 +805,543 @@
     </div>
 
     <script>
-        // IMPORTANT: Replace with your Cloudinary cloud name and upload preset
-        const CLOUD_NAME = 'dx0wli88x'; // Your Cloudinary cloud name
-        const UPLOAD_PRESET = 'uploads'; // Your Cloudinary upload preset
-
-        // You must upload sticker images to your Cloudinary account
-        // and replace the values here with their public IDs.
-        // For example, if you upload a crown emoji image and its public ID is 'my_crown_emoji',
-        // then the mapping would be: 'crown': 'my_crown_emoji'
-        const STICKER_PUBLIC_IDS = {
-            'crown': 'emoji_crown_v1',
-            'star': 'emoji_star_v1',
-            'heart': 'emoji_heart_v1',
-            'fire': 'emoji_fire_v1',
-            'laugh': 'emoji_laugh_v1',
-            'cool': 'emoji_cool_v1',
-            'sunglasses': 'emoji_sunglasses_v1',
-            'mustache': 'emoji_mustache_v1',
+        // Configuration Constants (would ideally come from backend API)
+        const CONFIG = {
+            CLOUD_NAME: 'dx0wli88x', // Should be injected server-side
+            UPLOAD_PRESET: 'uploads', // Should be injected server-side
+            MAX_FILE_SIZE: 5 * 1024 * 1024, // 5MB
+            ALLOWED_TYPES: ['image/jpeg', 'image/png', 'image/webp'],
+            DEBOUNCE_TIME: 150, // ms for preview updates
+            STICKER_PUBLIC_IDS: {
+                'crown': 'emoji_crown_v1',
+                'star': 'emoji_star_v1',
+                'heart': 'emoji_heart_v1',
+                'fire': 'emoji_fire_v1',
+                'laugh': 'emoji_laugh_v1',
+                'cool': 'emoji_cool_v1',
+                'sunglasses': 'emoji_sunglasses_v1',
+                'mustache': 'emoji_mustache_v1'
+            }
         };
-        
-        // Initialize Cloudinary - using Cloudinary.Image for more readable transformations
-        const cl = cloudinary.Cloudinary.new({ cloud_name: CLOUD_NAME });
+
+        // State Management
+        class EditorState {
+            constructor() {
+                this.imageId = '';
+                this.blur = 0;
+                this.filter = '';
+                this.sticker = '';
+                this.faceBlur = false;
+                this.isLoading = false;
+            }
+
+            reset() {
+                this.blur = 0;
+                this.filter = '';
+                this.sticker = '';
+                this.faceBlur = false;
+            }
+        }
+
+        // Initialize Cloudinary
+        const cl = cloudinary.Cloudinary.new({ cloud_name: CONFIG.CLOUD_NAME });
         
         // DOM Elements
-        const fileInput = document.getElementById('fileInput');
-        const browseBtn = document.getElementById('browseBtn');
-        const dropArea = document.getElementById('dropArea');
-        const uploadSpinner = document.getElementById('uploadSpinner');
-        const editorSection = document.getElementById('editorSection'); // Added for editor loading state
-        const editorSpinner = document.getElementById('editorSpinner'); // Added for editor loading state
-        const preview = document.getElementById('preview');
-        const previewPlaceholder = document.getElementById('previewPlaceholder');
-        const blurSlider = document.getElementById('blurSlider');
-        const blurValue = document.getElementById('blurValue');
-        const faceBlurToggle = document.getElementById('faceBlurToggle');
-        const filterButtons = document.querySelectorAll('.filter-btn');
-        const stickerButtons = document.querySelectorAll('.sticker');
-        const downloadBtn = document.getElementById('downloadBtn');
-        const resetAllBtn = document.getElementById('resetAllBtn');
-        const statusMessage = document.getElementById('statusMessage'); // For user feedback
+        const elements = {
+            fileInput: document.getElementById('fileInput'),
+            browseBtn: document.getElementById('browseBtn'),
+            dropArea: document.getElementById('dropArea'),
+            uploadSpinner: document.getElementById('uploadSpinner'),
+            editorSection: document.getElementById('editorSection'),
+            editorSpinner: document.getElementById('editorSpinner'),
+            preview: document.getElementById('preview'),
+            previewPlaceholder: document.getElementById('previewPlaceholder'),
+            blurSlider: document.getElementById('blurSlider'),
+            blurValue: document.getElementById('blurValue'),
+            faceBlurToggle: document.getElementById('faceBlurToggle'),
+            filterButtons: document.querySelectorAll('.filter-btn'),
+            stickerButtons: document.querySelectorAll('.sticker'),
+            downloadBtn: document.getElementById('downloadBtn'),
+            resetAllBtn: document.getElementById('resetAllBtn'),
+            statusMessage: document.getElementById('statusMessage')
+        };
 
-        // State variables
-        let uploadedImageId = '';
-        let currentBlur = 0;
-        let currentFilter = '';
-        let currentSticker = '';
-        let faceBlurEnabled = false;
-        let updatePreviewTimeout; // For debouncing slider
-        
+        // Application State
+        const state = new EditorState();
+        let updatePreviewTimeout;
+
         // --- Utility Functions ---
+
         /**
-         * Displays a status message to the user.
-         * @param {string} message The message to display.
-         * @param {string} type 'success', 'error', or 'info' (optional, defaults to info).
+         * Shows status message with auto-hide
+         * @param {string} message 
+         * @param {'success'|'error'|'info'} type 
          */
-        function showStatusMessage(message, type = 'info') {
+        function showStatus(message, type = 'info') {
+            const { statusMessage } = elements;
             statusMessage.textContent = message;
             statusMessage.style.display = 'block';
-            // Optional: Add styling based on type
-            statusMessage.style.backgroundColor = '';
-            statusMessage.style.borderColor = '';
-            if (type === 'error') {
-                statusMessage.style.backgroundColor = 'rgba(255, 99, 71, 0.2)'; // Tomato red light
-                statusMessage.style.borderColor = '#ff6347';
-            } else if (type === 'success') {
-                statusMessage.style.backgroundColor = 'rgba(16, 185, 129, 0.2)'; // Emerald green light
-                statusMessage.style.borderColor = '#10b981';
-            }
-            setTimeout(() => {
+            
+            // Reset previous styles
+            statusMessage.className = '';
+            statusMessage.classList.add(type);
+            
+            clearTimeout(statusMessage.timer);
+            statusMessage.timer = setTimeout(() => {
                 statusMessage.style.display = 'none';
-                statusMessage.textContent = '';
-            }, 5000); // Hide after 5 seconds
+            }, 5000);
         }
 
         /**
-         * Shows or hides the image preview placeholder.
-         * @param {boolean} show True to show placeholder, false to show image.
+         * Compresses image before upload (uses browser canvas API)
+         * @param {File} file 
+         * @param {number} [quality=0.8] 
+         * @returns {Promise<Blob>}
          */
-        function togglePreviewPlaceholder(show) {
-            previewPlaceholder.style.display = show ? 'block' : 'none';
-            preview.style.display = show ? 'none' : 'block';
-        }
-
-        /**
-         * Toggles the loading state for the upload area.
-         * @param {boolean} isLoading
-         */
-        function setUploadLoading(isLoading) {
-            dropArea.classList.toggle('loading', isLoading);
-            browseBtn.disabled = isLoading;
-            fileInput.disabled = isLoading;
-        }
-
-        /**
-         * Toggles the loading state for the editor section.
-         * @param {boolean} isLoading
-         */
-        function setEditorLoading(isLoading) {
-            editorSection.classList.toggle('loading', isLoading);
-            editorSpinner.style.display = isLoading ? 'block' : 'none';
-            // Disable all controls in editor while loading
-            editorSection.querySelectorAll('button, input[type="range"], input[type="checkbox"]').forEach(el => {
-                el.disabled = isLoading;
+        function compressImage(file, quality = 0.8) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        
+                        // Calculate new dimensions maintaining aspect ratio
+                        let width = img.width;
+                        let height = img.height;
+                        const MAX_DIMENSION = 2000;
+                        
+                        if (width > height && width > MAX_DIMENSION) {
+                            height *= MAX_DIMENSION / width;
+                            width = MAX_DIMENSION;
+                        } else if (height > MAX_DIMENSION) {
+                            width *= MAX_DIMENSION / height;
+                            height = MAX_DIMENSION;
+                        }
+                        
+                        canvas.width = width;
+                        canvas.height = height;
+                        ctx.drawImage(img, 0, 0, width, height);
+                        
+                        canvas.toBlob((blob) => {
+                            if (!blob) return reject(new Error('Canvas toBlob failed'));
+                            resolve(blob);
+                        }, file.type, quality);
+                    };
+                    img.onerror = reject;
+                    img.src = event.target.result;
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
             });
         }
 
         /**
-         * Generates Cloudinary transformation array based on current state.
-         * @returns {Array} An array of transformation objects.
+         * Uploads file to Cloudinary
+         * @param {Blob|File} file 
+         * @returns {Promise<string>} public_id
          */
-        function getCloudinaryTransformations() {
+        async function uploadToCloudinary(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('upload_preset', CONFIG.UPLOAD_PRESET);
+            
+            const response = await fetch(`https://api.cloudinary.com/v1_1/${CONFIG.CLOUD_NAME}/image/upload`, {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error?.message || 'Upload failed');
+            }
+            
+            const data = await response.json();
+            return data.public_id;
+        }
+
+        /**
+         * Updates UI loading states
+         * @param {'upload'|'editor'} context 
+         * @param {boolean} isLoading 
+         */
+        function setLoading(context, isLoading) {
+            state.isLoading = isLoading;
+            
+            if (context === 'upload') {
+                elements.dropArea.classList.toggle('loading', isLoading);
+                elements.browseBtn.disabled = isLoading;
+                elements.fileInput.disabled = isLoading;
+                elements.uploadSpinner.style.display = isLoading ? 'block' : 'none';
+            } else {
+                elements.editorSection.classList.toggle('loading', isLoading);
+                elements.editorSpinner.style.display = isLoading ? 'block' : 'none';
+                
+                // Disable all editor controls while loading
+                const controls = elements.editorSection.querySelectorAll('button, input');
+                controls.forEach(ctrl => ctrl.disabled = isLoading);
+            }
+        }
+
+        /**
+         * Generates Cloudinary URL with current transformations
+         * @returns {string}
+         */
+        function generateImageUrl() {
+            if (!state.imageId) return '';
+            
             const transformations = [];
             
-            if (currentBlur > 0) {
-                if (faceBlurEnabled) {
+            // Blur transformation
+            if (state.blur > 0) {
+                if (state.faceBlur) {
                     transformations.push({
-                        effect: `blur:${currentBlur}`,
+                        effect: `blur:${state.blur}`,
                         gravity: "faces",
                         flags: "region_relative"
                     });
                 } else {
-                    transformations.push({ effect: `blur:${currentBlur}` });
+                    transformations.push({ effect: `blur:${state.blur}` });
                 }
             }
             
-            if (currentFilter) {
-                transformations.push({ effect: currentFilter });
+            // Filter transformation
+            if (state.filter) {
+                transformations.push({ effect: state.filter });
             }
             
-            if (currentSticker) {
-                const stickerPublicId = STICKER_PUBLIC_IDS[currentSticker];
-                if (stickerPublicId) {
-                    let stickerTransform = { 
-                        overlay: stickerPublicId,
-                        width: 100, 
-                        height: 100, 
-                        crop: "scale"
-                    };
-                    
-                    // Adjust gravity/position for specific stickers
-                    switch(currentSticker) {
-                        case 'crown':
-                            stickerTransform.gravity = "north";
-                            stickerTransform.y = 20;
-                            stickerTransform.width = 120;
-                            stickerTransform.height = 120;
-                            break;
-                        case 'star':
-                            stickerTransform.gravity = "south_east";
-                            stickerTransform.x = 20;
-                            stickerTransform.y = 20;
-                            stickerTransform.width = 90;
-                            stickerTransform.height = 90;
-                            break;
-                        case 'heart':
-                            stickerTransform.gravity = "south_west";
-                            stickerTransform.x = 20;
-                            stickerTransform.y = 20;
-                            stickerTransform.width = 90;
-                            stickerTransform.height = 90;
-                            break;
-                        case 'fire':
-                            stickerTransform.gravity = "north_east";
-                            stickerTransform.x = 20;
-                            stickerTransform.y = 20;
-                            stickerTransform.width = 110;
-                            stickerTransform.height = 110;
-                            break;
-                        // Default gravity is center, no need for explicit case
-                    }
-                    transformations.push(stickerTransform);
-                } else {
-                    console.warn(`Sticker public ID not found for: ${currentSticker}`);
+            // Sticker transformation
+            if (state.sticker && CONFIG.STICKER_PUBLIC_IDS[state.sticker]) {
+                const stickerConfig = {
+                    overlay: CONFIG.STICKER_PUBLIC_IDS[state.sticker],
+                    width: 100,
+                    height: 100,
+                    crop: "scale"
+                };
+                
+                // Position specific stickers
+                switch(state.sticker) {
+                    case 'crown':
+                        Object.assign(stickerConfig, {
+                            gravity: "north",
+                            y: 20,
+                            width: 120,
+                            height: 120
+                        });
+                        break;
+                    case 'star':
+                        Object.assign(stickerConfig, {
+                            gravity: "south_east",
+                            x: 20,
+                            y: 20,
+                            width: 90,
+                            height: 90
+                        });
+                        break;
+                    case 'heart':
+                        Object.assign(stickerConfig, {
+                            gravity: "south_west",
+                            x: 20,
+                            y: 20,
+                            width: 90,
+                            height: 90
+                        });
+                        break;
+                    case 'fire':
+                        Object.assign(stickerConfig, {
+                            gravity: "north_east",
+                            x: 20,
+                            y: 20,
+                            width: 110,
+                            height: 110
+                        });
+                        break;
                 }
+                
+                transformations.push(stickerConfig);
             }
             
-            return transformations;
+            return cl.url(state.imageId, {
+                transformation: transformations,
+                quality: 'auto',
+                dpr: 'auto'
+            });
+        }
+
+        /**
+         * Updates preview image with debounce
+         */
+        function updatePreview() {
+            if (!state.imageId || state.isLoading) return;
+            
+            clearTimeout(updatePreviewTimeout);
+            updatePreviewTimeout = setTimeout(() => {
+                setLoading('editor', true);
+                const newUrl = generateImageUrl();
+                
+                // Use image cache busting to ensure fresh load
+                elements.preview.src = `${newUrl}&t=${Date.now()}`;
+                
+                // Handle load/error events
+                elements.preview.onload = () => setLoading('editor', false);
+                elements.preview.onerror = () => {
+                    setLoading('editor', false);
+                    showStatus('Failed to load preview', 'error');
+                };
+            }, CONFIG.DEBOUNCE_TIME);
         }
 
         // --- Event Handlers ---
 
-        /** Handles file selection via input or drag-drop. */
+        /**
+         * Handles file selection and upload
+         */
         async function handleFileSelect() {
-            if (!fileInput.files || !fileInput.files[0]) {
-                showStatusMessage('No file selected.', 'info');
+            const file = elements.fileInput.files?.[0];
+            if (!file) {
+                showStatus('No file selected', 'info');
                 return;
             }
             
-            const file = fileInput.files[0];
-            
-            // Validate file type and size
-            const validTypes = ['image/jpeg', 'image/png', 'image/webp'];
-            if (!validTypes.includes(file.type)) {
-                showStatusMessage('Please select an image file (JPG, PNG, or WEBP).', 'error');
-                fileInput.value = ''; // Clear file input
+            // Validate file
+            if (!CONFIG.ALLOWED_TYPES.includes(file.type)) {
+                showStatus('Invalid file type. Please use JPG, PNG, or WEBP.', 'error');
                 return;
             }
             
-            const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
-            if (file.size > MAX_FILE_SIZE) {
-                showStatusMessage('File size exceeds 5MB limit. Please choose a smaller image.', 'error');
-                fileInput.value = ''; // Clear file input
+            if (file.size > CONFIG.MAX_FILE_SIZE) {
+                showStatus('File exceeds 5MB limit', 'error');
                 return;
             }
-            
-            setUploadLoading(true);
-            showStatusMessage('Uploading image...', 'info');
-            
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('upload_preset', UPLOAD_PRESET);
             
             try {
-                const response = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`, {
-                    method: 'POST',
-                    body: formData
-                });
+                setLoading('upload', true);
+                showStatus('Uploading and optimizing image...', 'info');
                 
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(errorData.error.message || 'Image upload failed.');
-                }
-
-                const data = await response.json();
-                uploadedImageId = data.public_id;
+                // Compress image before upload (for large files)
+                const processedFile = file.size > 1024 * 1024 ? 
+                    await compressImage(file) : 
+                    file;
                 
-                togglePreviewPlaceholder(false); 
-                preview.src = data.secure_url; // Set initial preview before applying edits
-                showStatusMessage('Image uploaded successfully!', 'success');
-                downloadBtn.disabled = false;
-                resetAll(); // Reset all editing controls for the new image
-
-            } catch (err) {
-                console.error('Upload error:', err);
-                showStatusMessage(`Error uploading image: ${err.message}. Please try again.`, 'error');
-                togglePreviewPlaceholder(true);
-                downloadBtn.disabled = true;
+                // Upload to Cloudinary
+                state.imageId = await uploadToCloudinary(processedFile);
+                
+                // Update UI
+                elements.previewPlaceholder.style.display = 'none';
+                elements.preview.style.display = 'block';
+                elements.preview.src = cl.url(state.imageId);
+                elements.downloadBtn.disabled = false;
+                
+                // Reset editor state
+                resetAll();
+                showStatus('Image uploaded successfully!', 'success');
+                
+            } catch (error) {
+                console.error('Upload error:', error);
+                showStatus(`Upload failed: ${error.message}`, 'error');
+                elements.previewPlaceholder.style.display = 'block';
+                elements.preview.style.display = 'none';
+                elements.downloadBtn.disabled = true;
             } finally {
-                setUploadLoading(false);
-                fileInput.value = ''; // Clear the input after processing
+                setLoading('upload', false);
+                elements.fileInput.value = '';
             }
         }
-        
-        /** Updates the image preview with current transformations. */
-        function updatePreview() {
-            if (!uploadedImageId) return;
 
-            setEditorLoading(true); // Show editor spinner while transformations apply
-
-            // Debounce the update to prevent excessive calls, especially for slider
-            clearTimeout(updatePreviewTimeout);
-            updatePreviewTimeout = setTimeout(() => {
-                const transformations = getCloudinaryTransformations();
-                const image = cl.image(uploadedImageId, {
-                    transformation: transformations,
-                    quality: 'auto', // Optimize image quality
-                    dpr: 'auto' // Optimize for device pixel ratio
-                });
-                preview.src = image.toURL();
-                // Hide spinner once image is loaded (or shortly after)
-                preview.onload = () => setEditorLoading(false);
-                preview.onerror = () => {
-                    setEditorLoading(false);
-                    showStatusMessage('Failed to load image preview. Please try again.', 'error');
-                };
-            }, 150); // Debounce time in ms
-        }
-
-        /** Resets blur settings. */
-        function resetBlur() {
-            currentBlur = 0;
-            blurSlider.value = 0;
-            blurValue.textContent = '0';
-            faceBlurToggle.checked = false;
-            faceBlurEnabled = false;
-            updatePreview();
-            showStatusMessage('Blur settings reset.', 'info');
-        }
-        
-        /** Resets filter settings. */
-        function resetFilters() {
-            currentFilter = '';
-            filterButtons.forEach(btn => btn.classList.remove('active'));
-            updatePreview();
-            showStatusMessage('Filters reset.', 'info');
-        }
-        
-        /** Resets sticker settings. */
-        function resetStickers() {
-            currentSticker = '';
-            stickerButtons.forEach(btn => btn.classList.remove('active')); // Use active class for stickers too
-            updatePreview();
-            showStatusMessage('Stickers reset.', 'info');
-        }
-        
-        /** Resets all editing settings. */
+        /**
+         * Resets all editor settings
+         */
         function resetAll() {
-            resetBlur();
-            resetFilters();
-            resetStickers();
-            faceBlurToggle.checked = false; // Ensure UI is updated
-            faceBlurEnabled = false; // Ensure state is updated
-            updatePreview(); // Apply all resets to the preview
-            showStatusMessage('All edits reset.', 'info');
+            // Reset state
+            state.reset();
+            
+            // Reset UI elements
+            elements.blurSlider.value = 0;
+            elements.blurValue.textContent = '0';
+            elements.faceBlurToggle.checked = false;
+            
+            elements.filterButtons.forEach(btn => btn.classList.remove('active'));
+            elements.stickerButtons.forEach(btn => btn.classList.remove('active'));
+            
+            // Update preview
+            updatePreview();
+            showStatus('All edits reset', 'info');
         }
-        
-        /** Handles image download. */
+
+        /**
+         * Handles image download
+         */
         async function downloadImage() {
-            if (!uploadedImageId) {
-                showStatusMessage('No image to download. Please upload one first.', 'error');
+            if (!state.imageId) {
+                showStatus('No image to download', 'error');
                 return;
             }
             
-            downloadBtn.disabled = true;
-            const originalBtnText = downloadBtn.innerHTML;
-            downloadBtn.innerHTML = '<i class="fas fa-spinner fa-spin" aria-hidden="true"></i> Downloading...';
-            showStatusMessage('Preparing image for download...', 'info');
-
+            const originalText = elements.downloadBtn.innerHTML;
+            elements.downloadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Preparing...';
+            elements.downloadBtn.disabled = true;
+            
             try {
-                const transformations = getCloudinaryTransformations();
-                const downloadUrl = cl.url(uploadedImageId, { 
-                    transformation: transformations,
-                    flags: "attachment", // Force download
-                    format: "jpg", // Ensure consistent download format
-                    quality: 'auto' // Apply quality optimization
+                showStatus('Generating download...', 'info');
+                
+                const downloadUrl = cl.url(state.imageId, {
+                    transformation: generateImageUrl().transformation,
+                    flags: "attachment",
+                    format: "jpg",
+                    quality: 'auto'
                 });
                 
+                // Create temporary link for download
                 const link = document.createElement('a');
                 link.href = downloadUrl;
-                link.download = `pixelmagic_edited_${Date.now()}.jpg`;
+                link.download = `pixelmagic_${Date.now()}.jpg`;
+                link.style.display = 'none';
                 document.body.appendChild(link);
                 link.click();
-                document.body.removeChild(link);
-                showStatusMessage('Image downloaded successfully!', 'success');
-
+                
+                // Clean up
+                setTimeout(() => {
+                    document.body.removeChild(link);
+                    URL.revokeObjectURL(downloadUrl);
+                }, 100);
+                
+                showStatus('Download started!', 'success');
+                
             } catch (error) {
-                console.error("Error during download:", error);
-                showStatusMessage("Failed to download image. Please try again.", 'error');
+                console.error('Download error:', error);
+                showStatus('Download failed. Please try again.', 'error');
             } finally {
-                downloadBtn.disabled = false;
-                downloadBtn.innerHTML = originalBtnText;
+                elements.downloadBtn.innerHTML = originalText;
+                elements.downloadBtn.disabled = false;
             }
         }
 
-        // --- Initialize Event Listeners ---
+        // --- Event Listeners ---
+
         function initializeListeners() {
-            // File Upload
-            browseBtn.addEventListener('click', () => fileInput.click());
-            fileInput.addEventListener('change', handleFileSelect);
+            // File selection
+            elements.browseBtn.addEventListener('click', () => elements.fileInput.click());
+            elements.fileInput.addEventListener('change', handleFileSelect);
             
-            // Drag and Drop
-            dropArea.addEventListener('dragover', (e) => {
+            // Drag and drop
+            elements.dropArea.addEventListener('dragover', (e) => {
                 e.preventDefault();
-                dropArea.style.borderColor = 'var(--primary)';
-                dropArea.style.backgroundColor = 'rgba(99, 102, 241, 0.15)';
+                elements.dropArea.style.borderColor = 'var(--primary)';
+                elements.dropArea.style.background = 'rgba(99, 102, 241, 0.15)';
             });
             
-            dropArea.addEventListener('dragleave', () => {
-                dropArea.style.borderColor = '';
-                dropArea.style.backgroundColor = '';
+            elements.dropArea.addEventListener('dragleave', () => {
+                elements.dropArea.style.borderColor = '';
+                elements.dropArea.style.background = '';
             });
             
-            dropArea.addEventListener('drop', (e) => {
+            elements.dropArea.addEventListener('drop', (e) => {
                 e.preventDefault();
-                dropArea.style.borderColor = '';
-                dropArea.style.backgroundColor = '';
+                elements.dropArea.style.borderColor = '';
+                elements.dropArea.style.background = '';
                 
                 if (e.dataTransfer.files.length) {
-                    fileInput.files = e.dataTransfer.files;
+                    elements.fileInput.files = e.dataTransfer.files;
                     handleFileSelect();
                 }
             });
             
-            // Blur Slider
-            blurSlider.addEventListener('input', () => {
-                currentBlur = parseInt(blurSlider.value);
-                blurValue.textContent = currentBlur;
+            // Editor controls
+            elements.blurSlider.addEventListener('input', () => {
+                state.blur = parseInt(elements.blurSlider.value);
+                elements.blurValue.textContent = state.blur;
                 updatePreview();
             });
             
-            // Face Blur Toggle
-            faceBlurToggle.addEventListener('change', () => {
-                faceBlurEnabled = faceBlurToggle.checked;
+            elements.faceBlurToggle.addEventListener('change', () => {
+                state.faceBlur = elements.faceBlurToggle.checked;
                 updatePreview();
             });
             
-            // Filters (using delegation on parent is more efficient, but for fixed number, forEach is fine)
-            filterButtons.forEach(btn => {
+            // Filter buttons
+            elements.filterButtons.forEach(btn => {
                 btn.addEventListener('click', () => {
-                    const selectedFilter = btn.dataset.filter;
-                    if (currentFilter === selectedFilter) {
-                        currentFilter = '';
+                    const filter = btn.dataset.filter;
+                    
+                    if (state.filter === filter) {
+                        state.filter = '';
                         btn.classList.remove('active');
                     } else {
-                        filterButtons.forEach(b => b.classList.remove('active'));
+                        elements.filterButtons.forEach(b => b.classList.remove('active'));
                         btn.classList.add('active');
-                        currentFilter = selectedFilter;
+                        state.filter = filter;
                     }
+                    
                     updatePreview();
                 });
             });
             
-            // Stickers
-            stickerButtons.forEach(btn => {
+            // Sticker buttons
+            elements.stickerButtons.forEach(btn => {
                 btn.addEventListener('click', () => {
-                    const selectedSticker = btn.dataset.sticker;
-                    if (currentSticker === selectedSticker) {
-                        currentSticker = '';
+                    const sticker = btn.dataset.sticker;
+                    
+                    if (state.sticker === sticker) {
+                        state.sticker = '';
                         btn.classList.remove('active');
                     } else {
-                        stickerButtons.forEach(b => b.classList.remove('active'));
+                        elements.stickerButtons.forEach(b => b.classList.remove('active'));
                         btn.classList.add('active');
-                        currentSticker = selectedSticker;
+                        state.sticker = sticker;
                     }
+                    
                     updatePreview();
+                });
+                
+                // Keyboard accessibility
+                btn.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        btn.click();
+                    }
                 });
             });
             
-            // Reset Buttons
-            document.getElementById('resetBlur').addEventListener('click', resetBlur);
-            document.getElementById('resetFilters').addEventListener('click', resetFilters);
-            document.getElementById('resetStickers').addEventListener('click', resetStickers);
-            resetAllBtn.addEventListener('click', resetAll);
+            // Reset buttons
+            document.getElementById('resetBlur').addEventListener('click', () => {
+                state.blur = 0;
+                elements.blurSlider.value = 0;
+                elements.blurValue.textContent = '0';
+                updatePreview();
+                showStatus('Blur reset', 'info');
+            });
             
-            // Download Button
-            downloadBtn.addEventListener('click', downloadImage);
+            document.getElementById('resetFilters').addEventListener('click', () => {
+                state.filter = '';
+                elements.filterButtons.forEach(btn => btn.classList.remove('active'));
+                updatePreview();
+                showStatus('Filters reset', 'info');
+            });
+            
+            document.getElementById('resetStickers').addEventListener('click', () => {
+                state.sticker = '';
+                elements.stickerButtons.forEach(btn => btn.classList.remove('active'));
+                updatePreview();
+                showStatus('Stickers reset', 'info');
+            });
+            
+            elements.resetAllBtn.addEventListener('click', resetAll);
+            elements.downloadBtn.addEventListener('click', downloadImage);
         }
 
-        // --- Initial Setup on Load ---
-        window.addEventListener('load', () => {
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', () => {
             initializeListeners();
-            // Load a demo image on initial load
-            uploadedImageId = 'sample'; // Use Cloudinary's default sample image
-            preview.src = cl.url(uploadedImageId);
-            togglePreviewPlaceholder(false);
-            downloadBtn.disabled = false;
-            resetAll(); // Apply initial resets to ensure UI matches state
-            showStatusMessage('Welcome to PixelMagic! A demo image is loaded for you.', 'info');
+            
+            // Load demo image
+            state.imageId = 'sample';
+            elements.preview.src = cl.url('sample');
+            elements.previewPlaceholder.style.display = 'none';
+            elements.preview.style.display = 'block';
+            elements.downloadBtn.disabled = false;
+            
+            showStatus('Welcome to PixelMagic! A demo image is loaded.', 'info');
         });
     </script>
 </body>
